@@ -10,6 +10,7 @@ env:
   IMAGES_URL: http://localhost:3001
   API_URL: http://localhost:3060
   PDF_SERVICE_V2_URL: http://localhost:3002
+  MAILPIT_URL: http://localhost:1080
   API_KEY: dvl-1510egmf4a23d80342403fb599qd
   CI: true
 
@@ -74,12 +75,16 @@ jobs:
         env:
           MINIO_ROOT_USER: user
           MINIO_ROOT_PASSWORD: password
-      maildev:
-        image: maildev/maildev:latest
+      mailpit:
+        image: axllent/mailpit
         ports:
           - 1025:1025
-          - 1080:1080
-        options: --health-cmd "curl -f http://localhost:1080 || exit 1" --health-interval 10s --health-timeout 5s --health-retries 5
+          - 1080:8025
+        options: --health-cmd "wget --spider -q http://localhost:8025/ || exit 1" --health-interval 10s --health-timeout 5s --health-retries 5
+        env:
+          MP_MAX_MESSAGES: 5000
+          MP_SMTP_AUTH_ACCEPT_ANY: 1
+          MP_SMTP_AUTH_ALLOW_INSECURE: 1
 
     steps:
       # man-db trigger on apt install is taking some time
