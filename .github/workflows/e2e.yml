@@ -74,6 +74,12 @@ jobs:
         env:
           MINIO_ROOT_USER: user
           MINIO_ROOT_PASSWORD: password
+      maildev:
+        image: maildev/maildev:latest
+        ports:
+          - 1025:1025
+          - 1080:1080
+        options: --health-cmd "curl -f http://localhost:1080 || exit 1" --health-interval 10s --health-timeout 5s --health-retries 5
 
     steps:
       # man-db trigger on apt install is taking some time
