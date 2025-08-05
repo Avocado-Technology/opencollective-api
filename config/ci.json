@@ -1,6 +1,6 @@
 {
   "database": {
-    "url": "postgres://opencollective@localhost:5432/opencollective_dvl",
+    "url": "postgres://opencollective:password@localhost:5432/opencollective_dvl",
     "options": {
       "logging": false,
       "benchmark": true
@@ -16,7 +16,7 @@
     }
   },
   "maintenancedb": {
-    "url": "postgres://postgres@localhost:5432/postgres"
+    "url": "postgres://postgres:password@localhost:5432/postgres"
   },
   "limits": {
     "giftCards": {
