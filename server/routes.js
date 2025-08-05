@@ -266,7 +266,8 @@ export default async app => {
     // https://www.apollographql.com/docs/apollo-server/api/apollo-server#persistedqueries
     persistedQueries: false,
     // https://www.apollographql.com/docs/apollo-server/api/apollo-server#csrfprevention
-    csrfPrevention: { requestHeaders: ['Authorization'] },
+    // Disable CSRF prevention in development to allow GraphQL Playground and easier testing
+    csrfPrevention: config.env === 'development' ? false : { requestHeaders: ['Authorization'] },
     // https://www.apollographql.com/docs/apollo-server/api/apollo-server#formaterror
     formatError: (formattedError, error) => {
       logger.error(`GraphQL error: ${formattedError.message}`);
@@ -328,6 +329,91 @@ export default async app => {
    * GraphQL default (v2)
    */
   app.use('/graphql', expressMiddleware(graphqlServerV2, apolloExpressMiddlewareOptions));
+
+  /**
+   * GraphQL Playground for Development
+   */
+  if (config.env === 'development') {
+    const playgroundHTML = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset=utf-8/>
+  <meta name="viewport" content="user-scalable=no, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, minimal-ui">
+  <title>GraphQL Playground</title>
+  <link rel="stylesheet" href="//cdn.jsdelivr.net/npm/graphql-playground-react/build/static/css/index.css" />
+  <link rel="shortcut icon" href="//cdn.jsdelivr.net/npm/graphql-playground-react/build/favicon.png" />
+  <script src="//cdn.jsdelivr.net/npm/graphql-playground-react/build/static/js/middleware.js"></script>
+</head>
+<body>
+  <div id="root">
+    <style>
+      body {
+        background-color: rgb(23, 42, 58);
+        font-family: Open Sans, sans-serif;
+        height: 90vh;
+      }
+      #root {
+        height: 100%;
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .loading {
+        font-size: 32px;
+        font-weight: 200;
+        color: rgba(255, 255, 255, .6);
+        margin-left: 20px;
+      }
+      img {
+        width: 78px;
+        height: 78px;
+      }
+      .title {
+        font-weight: 400;
+      }
+    </style>
+    <img src="//cdn.jsdelivr.net/npm/graphql-playground-react/build/logo.png" alt="">
+    <div class="loading"> Loading
+      <span class="title">GraphQL Playground</span>
+    </div>
+  </div>
+  <script>window.addEventListener('load', function (event) {
+      GraphQLPlayground.init(document.getElementById('root'), {
+        endpoint: '/graphql',
+        subscriptionEndpoint: '/graphql',
+        settings: {
+          'editor.theme': 'dark',
+          'editor.reuseHeaders': true,
+          'tracing.hideTracingResponse': true,
+          'editor.fontSize': 14,
+          'editor.fontFamily': '"Source Code Pro", "Consolas", "Inconsolata", "Droid Sans Mono", "Monaco", monospace',
+          'request.credentials': 'omit',
+        },
+      })
+    })</script>
+</body>
+</html>`;
+
+    // Serve GraphQL Playground at dedicated playground endpoint
+    app.get('/playground', (req, res) => {
+      res.setHeader('Content-Type', 'text/html');
+      res.send(playgroundHTML);
+    });
+
+    app.get('/playground/v1', (req, res) => {
+      const v1PlaygroundHTML = playgroundHTML.replace("endpoint: '/graphql'", "endpoint: '/graphql/v1'");
+      res.setHeader('Content-Type', 'text/html');
+      res.send(v1PlaygroundHTML);
+    });
+
+    app.get('/playground/v2', (req, res) => {
+      const v2PlaygroundHTML = playgroundHTML.replace("endpoint: '/graphql'", "endpoint: '/graphql/v2'");
+      res.setHeader('Content-Type', 'text/html');
+      res.send(v2PlaygroundHTML);
+    });
+  }
 
   /**
    * Webhooks that should bypass api key check

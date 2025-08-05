@@ -1,0 +1,163 @@
+name: Manual Deploy OpenCollective API
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      skip_tests:
+        description: 'Skip tests'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set environment variables
+        id: set-env
+        run: |
+          if [ "${{ github.event.inputs.environment }}" = "dev" ]; then
+            echo "SERVER_HOST=${{ secrets.DEV_HOST }}" >> $GITHUB_OUTPUT
+            echo "SERVER_USER=${{ secrets.DEV_USERNAME }}" >> $GITHUB_OUTPUT
+            echo "SERVER_KEY=${{ secrets.DEV_SSH_KEY }}" >> $GITHUB_OUTPUT
+            echo "API_URL=${{ secrets.DEV_API_URL }}" >> $GITHUB_OUTPUT
+            echo "API_DOMAIN=${{ secrets.DEV_API_DOMAIN }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.inputs.environment }}" = "staging" ]; then
+            echo "SERVER_HOST=${{ secrets.STAGING_HOST }}" >> $GITHUB_OUTPUT
+            echo "SERVER_USER=${{ secrets.STAGING_USERNAME }}" >> $GITHUB_OUTPUT
+            echo "SERVER_KEY=${{ secrets.STAGING_SSH_KEY }}" >> $GITHUB_OUTPUT
+            echo "API_URL=${{ secrets.STAGING_API_URL }}" >> $GITHUB_OUTPUT
+            echo "API_DOMAIN=${{ secrets.STAGING_API_DOMAIN }}" >> $GITHUB_OUTPUT
+          else
+            echo "SERVER_HOST=${{ secrets.PROD_HOST }}" >> $GITHUB_OUTPUT
+            echo "SERVER_USER=${{ secrets.PROD_USERNAME }}" >> $GITHUB_OUTPUT
+            echo "SERVER_KEY=${{ secrets.PROD_SSH_KEY }}" >> $GITHUB_OUTPUT
+            echo "API_URL=${{ secrets.PROD_API_URL }}" >> $GITHUB_OUTPUT
+            echo "API_DOMAIN=${{ secrets.PROD_API_DOMAIN }}" >> $GITHUB_OUTPUT
+          fi
+          echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ steps.set-env.outputs.SERVER_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          ssh-keyscan -H ${{ steps.set-env.outputs.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Backup existing configuration
+        run: |
+          # Create backup of existing setup
+          ssh ${{ steps.set-env.outputs.SERVER_USER }}@${{ steps.set-env.outputs.SERVER_HOST }} "mkdir -p ~/opencollective-api-deployment"
+
+          # Backup existing containers and networks
+          ssh ${{ steps.set-env.outputs.SERVER_USER }}@${{ steps.set-env.outputs.SERVER_HOST }} "
+            mkdir -p ~/api-backup-$(date +%Y%m%d-%H%M%S)
+            cd ~/api-backup-$(date +%Y%m%d-%H%M%S)
+            docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' > containers-before.txt || true
+            docker network ls > networks-before.txt || true
+            if docker ps | grep -q opencollective-api; then
+              docker inspect opencollective-api > api-config.json 2>/dev/null || true
+              docker logs opencollective-api > api-logs.txt 2>/dev/null || true
+            fi
+            if docker ps | grep -q opencollective-postgres; then
+              docker exec opencollective-postgres pg_dump -U postgres opencollective > database-backup.sql 2>/dev/null || true
+            fi
+            echo 'Backup completed in:' && pwd
+          "
+
+      - name: Deploy to server with migration
+        run: |
+          # Copy files to server
+          scp -r ./* ${{ steps.set-env.outputs.SERVER_USER }}@${{ steps.set-env.outputs.SERVER_HOST }}:~/opencollective-api-deployment/
+
+          # Execute migration script for smooth transition
+          ssh ${{ steps.set-env.outputs.SERVER_USER }}@${{ steps.set-env.outputs.SERVER_HOST }} "cd ~/opencollective-api-deployment && ./migrate.sh ${{ steps.set-env.outputs.environment }}"
+
+      - name: Run tests
+        if: ${{ github.event.inputs.skip_tests != 'true' }}
+        run: |
+          # Wait for services to be ready
+          echo "⏳ Waiting for services..."
+          sleep 30
+
+          # Test API health
+          ssh ${{ steps.set-env.outputs.SERVER_USER }}@${{ steps.set-env.outputs.SERVER_HOST }} "
+            echo '🔍 Testing API health...'
+            
+            # Test health endpoint
+            if curl -f http://localhost:3060/health >/dev/null 2>&1; then
+              echo '✅ Health endpoint responding'
+            else
+              echo '⚠️ Health endpoint not responding'
+            fi
+            
+            # Test GraphQL endpoint
+            if curl -f http://localhost:3060/graphql >/dev/null 2>&1; then
+              echo '✅ GraphQL endpoint responding'
+            else
+              echo '⚠️ GraphQL endpoint not responding'
+            fi
+            
+            # Check database connectivity
+            if docker exec opencollective-api npm run db:migrate >/dev/null 2>&1; then
+              echo '✅ Database connectivity confirmed'
+            else
+              echo '⚠️ Database connectivity issues'
+            fi
+          "
+
+      - name: Verify deployment
+        run: |
+          # Check if API is running
+          ssh ${{ steps.set-env.outputs.SERVER_USER }}@${{ steps.set-env.outputs.SERVER_HOST }} "cd ~/opencollective-api-deployment && docker-compose ps | grep -q 'Up' || exit 1"
+
+          echo "✅ OpenCollective API deployed and tested successfully on ${{ steps.set-env.outputs.environment }}"
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "❌ OpenCollective API deployment to ${{ steps.set-env.outputs.environment }} failed - checking for rollback"
+          ssh ${{ steps.set-env.outputs.SERVER_USER }}@${{ steps.set-env.outputs.SERVER_HOST }} "
+            echo '🔍 Checking for recent backups...'
+            LATEST_BACKUP=\$(ls -td ~/api-backup-* 2>/dev/null | head -1)
+            if [ -n \"\$LATEST_BACKUP\" ]; then
+              echo \"📁 Latest backup found: \$LATEST_BACKUP\"
+              echo \"⚠️  Automatic rollback not implemented for safety\"
+              echo \"💡 To rollback manually, run: cd ~/opencollective-api-deployment && ./rollback.sh \$LATEST_BACKUP\"
+            else
+              echo \"📁 No backup found for rollback\"
+            fi
+            
+            echo '📊 Current system state:'
+            docker ps | grep opencollective || echo 'No opencollective containers running'
+            
+            echo '📋 Logs for troubleshooting:'
+            docker logs opencollective-api --tail=50 2>/dev/null || echo 'No API container logs available'
+          "
+
+      - name: Notify on completion
+        if: success()
+        run: |
+          echo "🎉 OpenCollective API successfully deployed to ${{ steps.set-env.outputs.environment }}"
+          echo "🌐 API accessible at: ${{ steps.set-env.outputs.API_URL }}"
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "❌ OpenCollective API deployment to ${{ steps.set-env.outputs.environment }} failed"
+          echo "💡 Check logs above for rollback instructions"

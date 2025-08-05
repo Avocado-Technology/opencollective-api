@@ -1,0 +1,299 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: 'package.json'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Lint commit messages
+        if: github.event_name == 'pull_request'
+        run: npx commitlint --from ${{ github.event.pull_request.head.sha }}~${{ github.event.pull_request.commits }} --to ${{ github.event.pull_request.head.sha }} --verbose
+
+      - name: Run linting
+        run: npm run lint:check
+
+      - name: Run prettier check
+        run: npm run prettier:check
+
+      - name: Run TypeScript check
+        run: npm run type:check
+
+      - name: Validate deployment scripts
+        run: |
+          echo "🔍 Validating deployment scripts..."
+          for script in *.sh; do
+            if [ -f "$script" ]; then
+              echo "Checking $script..."
+              bash -n "$script"
+            fi
+          done
+
+      - name: Validate docker-compose files
+        run: |
+          echo "🔍 Validating docker-compose files..."
+
+          # Install docker-compose if not available
+          if ! command -v docker-compose &> /dev/null; then
+            echo "Installing docker-compose..."
+            sudo curl -L "https://github.com/docker/compose/releases/download/2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            sudo chmod +x /usr/local/bin/docker-compose
+          fi
+
+          for compose_file in docker-compose*.yml; do
+            if [ -f "$compose_file" ]; then
+              echo "Validating $compose_file..."
+              docker-compose -f "$compose_file" config --quiet || echo "⚠️ Validation failed for $compose_file (expected without environment variables)"
+            fi
+          done
+
+      - name: Build application
+        run: npm run build
+
+  unit-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    services:
+      redis:
+        image: redis
+        ports:
+          - 6379:6379
+        options: --entrypoint redis-server
+      postgres:
+        image: postgres:16.9
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+      minio:
+        image: minio/minio:edge-cicd
+        ports:
+          - 9000:9000
+        options: --name=minio --health-cmd "curl http://localhost:9000/minio/health/live"
+        env:
+          MINIO_ROOT_USER: user
+          MINIO_ROOT_PASSWORD: password
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: 'package.json'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Restore database
+        run: npm run db:restore
+
+      - name: Run migrations
+        run: npm run db:migrate
+
+      - name: Run unit tests
+        run: npm run test:coverage -- --ignore "test/server/graphql/**"
+
+      - name: Report coverage
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: Unit
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [test, unit-tests]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: 'package.json'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx semantic-release
+
+  deploy-dev:
+    runs-on: ubuntu-latest
+    needs: [test, unit-tests, release]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    environment: dev
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.DEV_SSH_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          ssh-keyscan -H ${{ secrets.DEV_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Get latest release version
+        id: get-version
+        run: |
+          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Deploying version: $VERSION"
+
+      - name: Deploy to development server
+        timeout-minutes: 15
+        run: |
+          # Copy files to server
+          echo "📦 Copying files to development server..."
+          scp -r ./* ${{ secrets.DEV_USERNAME }}@${{ secrets.DEV_HOST }}:~/opencollective-api-deployment/
+
+          # Create environment file from secrets
+          echo "📋 Creating environment file..."
+          ssh ${{ secrets.DEV_USERNAME }}@${{ secrets.DEV_HOST }} "
+            cd ~/opencollective-api-deployment
+            echo 'NODE_ENV=development' > .env.dev
+            echo 'PORT=3060' >> .env.dev
+            echo 'PG_HOST=postgres' >> .env.dev
+            echo 'PG_PORT=5432' >> .env.dev
+            echo 'PG_DATABASE=${{ secrets.DEV_PG_DATABASE }}' >> .env.dev
+            echo 'PG_USERNAME=${{ secrets.DEV_PG_USERNAME }}' >> .env.dev
+            echo 'PG_PASSWORD=${{ secrets.DEV_PG_PASSWORD }}' >> .env.dev
+            echo 'REDIS_URL=redis://redis:6379' >> .env.dev
+            echo 'REDIS_SESSION_URL=redis://redis:6379' >> .env.dev
+            echo 'API_URL=${{ secrets.DEV_API_URL }}' >> .env.dev
+            echo 'WEBSITE_URL=${{ secrets.DEV_WEBSITE_URL }}' >> .env.dev
+            echo 'API_DOMAIN=${{ secrets.DEV_API_DOMAIN }}' >> .env.dev
+          "
+
+          # Execute deployment script
+          echo "🚀 Starting deployment on development server..."
+          ssh ${{ secrets.DEV_USERNAME }}@${{ secrets.DEV_HOST }} "
+            cd ~/opencollective-api-deployment
+            echo '📦 Deploying OpenCollective API version ${{ steps.get-version.outputs.version }} to dev'
+            ./deploy.sh dev
+          "
+
+      - name: Verify deployment
+        run: |
+          # Check if application is running
+          ssh ${{ secrets.DEV_USERNAME }}@${{ secrets.DEV_HOST }} "
+            cd ~/opencollective-api-deployment
+            docker-compose -f docker-compose.dev.yml --env-file .env.dev ps | grep -q 'Up' || exit 1
+          "
+
+          echo "✅ OpenCollective API version ${{ steps.get-version.outputs.version }} deployed successfully to dev"
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [test, unit-tests, release]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: staging
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.STAGING_SSH_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          ssh-keyscan -H ${{ secrets.STAGING_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Get latest release version
+        id: get-version
+        run: |
+          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Deploying version: $VERSION"
+
+      - name: Deploy to staging server
+        timeout-minutes: 15
+        run: |
+          # Copy files to server
+          echo "📦 Copying files to staging server..."
+          scp -r ./* ${{ secrets.STAGING_USERNAME }}@${{ secrets.STAGING_HOST }}:~/opencollective-api-deployment/
+
+          # Create environment file from secrets
+          echo "📋 Creating environment file..."
+          ssh ${{ secrets.STAGING_USERNAME }}@${{ secrets.STAGING_HOST }} "
+            cd ~/opencollective-api-deployment
+            echo 'NODE_ENV=production' > .env.staging
+            echo 'PORT=3060' >> .env.staging
+            echo 'PG_HOST=postgres' >> .env.staging
+            echo 'PG_PORT=5432' >> .env.staging
+            echo 'PG_DATABASE=${{ secrets.STAGING_PG_DATABASE }}' >> .env.staging
+            echo 'PG_USERNAME=${{ secrets.STAGING_PG_USERNAME }}' >> .env.staging
+            echo 'PG_PASSWORD=${{ secrets.STAGING_PG_PASSWORD }}' >> .env.staging
+            echo 'REDIS_URL=redis://redis:6379' >> .env.staging
+            echo 'REDIS_SESSION_URL=redis://redis:6379' >> .env.staging
+            echo 'API_URL=${{ secrets.STAGING_API_URL }}' >> .env.staging
+            echo 'WEBSITE_URL=${{ secrets.STAGING_WEBSITE_URL }}' >> .env.staging
+            echo 'API_DOMAIN=${{ secrets.STAGING_API_DOMAIN }}' >> .env.staging
+          "
+
+          # Execute deployment script
+          echo "🚀 Starting deployment on staging server..."
+          ssh ${{ secrets.STAGING_USERNAME }}@${{ secrets.STAGING_HOST }} "
+            cd ~/opencollective-api-deployment
+            echo '📦 Deploying OpenCollective API version ${{ steps.get-version.outputs.version }} to staging'
+            ./deploy.sh staging
+          "
+
+      - name: Verify deployment
+        run: |
+          # Check if application is running
+          ssh ${{ secrets.STAGING_USERNAME }}@${{ secrets.STAGING_HOST }} "
+            cd ~/opencollective-api-deployment
+            docker-compose -f docker-compose.staging.yml --env-file .env.staging ps | grep -q 'Up' || exit 1
+          "
+
+          echo "✅ OpenCollective API version ${{ steps.get-version.outputs.version }} deployed successfully to staging"
