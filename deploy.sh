@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# OpenCollective Frontend Deployment Script
-# Based on the Traefik deployment model
+# OpenCollective API Deployment Script
+# Usage: ./deploy.sh [dev|staging|prod]
 
 set -e
 
@@ -41,7 +41,7 @@ if [[ ! "$ENVIRONMENT" =~ ^(dev|staging|prod)$ ]]; then
     error "Invalid environment. Use: dev, staging, or prod"
 fi
 
-info "🚀 Deploying OpenCollective Frontend to $ENVIRONMENT environment..."
+info "🚀 Deploying OpenCollective API to $ENVIRONMENT environment..."
 
 # Load environment variables
 ENV_FILE=".env.$ENVIRONMENT"
@@ -99,21 +99,27 @@ sleep 10
 info "📊 Container status:"
 docker-compose -f "$DOCKER_COMPOSE_FILE" ps
 
+# Run database migrations if needed
+info "🗃️  Running database migrations..."
+docker exec opencollective-api npm run db:migrate || warning "Migration failed or not needed"
+
 # Health check
 info "🏥 Performing health check..."
-if [ "$ENVIRONMENT" = "dev" ]; then
-    if curl -f http://localhost:3000/api/health > /dev/null 2>&1; then
-        success "Health check passed!"
-    else
-        warning "Health check failed, but deployment completed"
-    fi
+sleep 5
+if curl -f http://localhost:3060/health > /dev/null 2>&1 || curl -f http://localhost:3060/graphql > /dev/null 2>&1; then
+    success "Health check passed!"
+else
+    warning "Health check failed, but deployment completed"
 fi
 
-success "OpenCollective Frontend deployed successfully to $ENVIRONMENT!"
+success "OpenCollective API deployed successfully to $ENVIRONMENT!"
 
 # Show helpful information
 if [ "$ENVIRONMENT" = "dev" ]; then
-    info "🌐 Frontend available at: http://localhost:3000"
+    info "🌐 API available at: http://localhost:3060"
+    info "📊 GraphQL playground: http://localhost:3060/graphql"
+    info "📧 Maildev interface: http://localhost:1080"
+    info "🗄️  MinIO console: http://localhost:9001 (user: user, password: password)"
     info "🔍 To check logs: docker-compose -f $DOCKER_COMPOSE_FILE logs -f"
     info "🛑 To stop: docker-compose -f $DOCKER_COMPOSE_FILE down"
 fi
