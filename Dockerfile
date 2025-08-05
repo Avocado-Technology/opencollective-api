@@ -2,6 +2,7 @@
 FROM node:20-alpine
 
 # Install dependencies for building native modules and runtime tools
+# Add vips-dev and other dependencies for sharp module
 RUN apk add --no-cache \
     curl \
     bash \
@@ -9,6 +10,10 @@ RUN apk add --no-cache \
     make \
     g++ \
     linux-headers \
+    vips-dev \
+    fftw-dev \
+    build-base \
+    libc6-compat \
     && apk add --no-cache --virtual .gyp \
     py3-setuptools
 
@@ -25,7 +30,9 @@ COPY scripts/ ./scripts/
 
 # Install dependencies with legacy peer deps to resolve conflicts, skip postinstall
 ENV SKIP_POSTINSTALL=1
-RUN npm install --legacy-peer-deps
+# Force sharp to rebuild from source with proper bindings
+ENV SHARP_IGNORE_GLOBAL_LIBVIPS=1
+RUN npm install --legacy-peer-deps && npm rebuild sharp
 
 # Copy rest of application source
 COPY --chown=opencollective:nodejs . .
