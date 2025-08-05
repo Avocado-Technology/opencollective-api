@@ -1,158 +1,45 @@
 networks:
   opencollective-dev:
     driver: bridge
+  traefik-dev:
+    external: true
 
 services:
-  api:
+  frontend:
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: opencollective-api
+      platform: linux/amd64
+    container_name: opencollective-frontend-dev
     restart: unless-stopped
+    networks:
+      - opencollective-dev
+      - traefik-dev
+    ports:
+      - "3000:3000"
     environment:
-      - NODE_ENV=${NODE_ENV:-development}
-      - PORT=${PORT:-3060}
-      - PG_HOST=${PG_HOST:-postgres}
-      - PG_PORT=${PG_PORT:-5432}
-      - PG_DATABASE=${PG_DATABASE:-opencollective_dvl}
-      - PG_USERNAME=${PG_USERNAME:-opencollective}
-      - PG_PASSWORD=${PG_PASSWORD:-password}
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
-      - REDIS_SESSION_URL=${REDIS_SESSION_URL:-redis://redis:6379}
-      - API_URL=${API_URL:-http://localhost:3060}
-      - WEBSITE_URL=${WEBSITE_URL:-http://localhost:3000}
-      - IMAGES_URL=${IMAGES_URL:-http://localhost:3000}
-      - PDF_SERVICE_URL=${PDF_SERVICE_URL:-http://localhost:3002}
-      - MAILGUN_API_KEY=${MAILGUN_API_KEY}
-      - MAILGUN_DOMAIN=${MAILGUN_DOMAIN}
-      - TWITTER_CONSUMER_KEY=${TWITTER_CONSUMER_KEY}
-      - TWITTER_CONSUMER_SECRET=${TWITTER_CONSUMER_SECRET}
-      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
-      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
-      - STRIPE_KEY=${STRIPE_KEY}
-      - STRIPE_SECRET=${STRIPE_SECRET}
-      - PAYPAL_ENVIRONMENT=${PAYPAL_ENVIRONMENT:-sandbox}
-      - PAYPAL_CLIENT_ID=${PAYPAL_CLIENT_ID}
-      - PAYPAL_CLIENT_SECRET=${PAYPAL_CLIENT_SECRET}
-      - AWS_KEY=${AWS_KEY:-user}
-      - AWS_SECRET=${AWS_SECRET:-password}
-      - AWS_S3_BUCKET=${AWS_S3_BUCKET:-opencollective-dev}
-      - AWS_S3_REGION=${AWS_S3_REGION:-us-east-1}
-      - AWS_S3_ENDPOINT=${AWS_S3_ENDPOINT:-http://minio:9000}
-      - AWS_S3_FORCE_PATH_STYLE=${AWS_S3_FORCE_PATH_STYLE:-true}
-    networks:
-      - opencollective-dev
-    ports:
-      - "${PORT:-3060}:3060"
-    depends_on:
-      - postgres
-      - redis
+      NODE_ENV: development
+      OC_ENV: development
+      API_URL: http://opencollective-api:3060
+      INTERNAL_API_URL: http://opencollective-api:3060
+      IMAGES_URL: http://opencollective-api:9000
+      PDF_SERVICE_V2_URL: http://pdf-service:3002
+      ML_SERVICE_URL: http://ml-service:8000
+      API_KEY: your_api_key_here
+      TRAEFIK_DOMAIN: ${FRONTEND_DOMAIN}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend-dev.rule=Host(`${FRONTEND_DOMAIN}`)"
+      - "traefik.http.routers.frontend-dev.entrypoints=websecure"
+      - "traefik.http.routers.frontend-dev.tls.certresolver=letsencrypt"
+      - "traefik.http.services.frontend-dev.loadbalancer.server.port=3000"
     volumes:
-      - ./logs:/usr/src/app/logs
-      - ./uploads:/usr/src/app/uploads
+      - .:/usr/src/frontend
+      - /usr/src/frontend/node_modules
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3060/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health || exit 1"]
       interval: 30s
-      timeout: 10s
-      retries: 3
-
-  postgres:
-    image: postgres:15
-    container_name: opencollective-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${PG_DATABASE:-opencollective_dvl}
-      POSTGRES_USER: ${PG_USERNAME:-opencollective}
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-password}
-      # Create additional databases for testing
-      POSTGRES_MULTIPLE_DATABASES: ${PG_DATABASE:-opencollective_dvl},opencollective_test,opencollective_e2e
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./test/dbdumps:/docker-entrypoint-initdb.d
-    networks:
-      - opencollective-dev
-    ports:
-      - "${PG_PORT:-5432}:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PG_USERNAME:-opencollective} -d ${PG_DATABASE:-opencollective_dvl}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    container_name: opencollective-redis
-    restart: unless-stopped
-    command: redis-server --appendonly yes --appendfsync everysec --maxmemory 256mb --maxmemory-policy allkeys-lru
-    volumes:
-      - redis_data:/data
-    networks:
-      - opencollective-dev
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  memcached:
-    image: memcached:1.6-alpine
-    container_name: opencollective-memcached
-    restart: unless-stopped
-    command: memcached -m 64
-    networks:
-      - opencollective-dev
-    ports:
-      - "${MEMCACHED_PORT:-11211}:11211"
-    healthcheck:
-      test: ["CMD-SHELL", "echo stats | nc localhost 11211"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Development tools
-  maildev:
-    image: maildev/maildev:latest
-    container_name: opencollective-maildev
-    restart: unless-stopped
-    networks:
-      - opencollective-dev
-    ports:
-      - "1080:1080"  # Web interface
-      - "1025:1025"  # SMTP
-    environment:
-      MP_MAX_MESSAGES: 5000
-      MP_SMTP_AUTH_ACCEPT_ANY: 1
-      MP_SMTP_AUTH_ALLOW_INSECURE: 1
-    healthcheck:
-      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:1080/ || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  minio:
-    image: minio/minio:latest
-    container_name: opencollective-minio
-    restart: unless-stopped
-    networks:
-      - opencollective-dev
-    ports:
-      - "9000:9000"  # API
-      - "9001:9001"  # Console
-    environment:
-      MINIO_ROOT_USER: ${AWS_KEY:-user}
-      MINIO_ROOT_PASSWORD: ${AWS_SECRET:-password}
-    volumes:
-      - minio_data:/data
-    command: server /data --console-address :9001
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 20s
-      retries: 3
-
-volumes:
-  postgres_data:
-  redis_data:
-  minio_data:
+      timeout: 15s
+      retries: 10
+      start_period: 120s

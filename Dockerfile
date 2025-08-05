@@ -1,58 +1,64 @@
-# Use official Node.js runtime as base image
-FROM node:20-alpine
+# Multi-stage build for optimized performance and size
+FROM node:20-alpine AS base
 
-# Install dependencies for building native modules and runtime tools
-# Add vips-dev and other dependencies for sharp module
+# Install curl for health checks, dependencies, and build tools for native modules
 RUN apk add --no-cache \
     curl \
+    libc6-compat \
     bash \
     python3 \
     make \
     g++ \
     linux-headers \
-    vips-dev \
-    fftw-dev \
-    build-base \
-    libc6-compat \
-    && apk add --no-cache --virtual .gyp \
     py3-setuptools
 
-# Set working directory
-WORKDIR /usr/src/app
+WORKDIR /usr/src/frontend
 
-# Create app user for security
-RUN addgroup -g 1001 -S nodejs
-RUN adduser -S opencollective -u 1001
+# Skip Cypress Install
+ENV CYPRESS_INSTALL_BINARY=0
 
-# Copy package files and scripts needed for install
+# Install dependencies only when needed
+FROM base AS deps
+# Copy package files
 COPY package*.json ./
-COPY scripts/ ./scripts/
+# Install dependencies with --legacy-peer-deps to resolve React 19 conflicts
+RUN npm install --legacy-peer-deps --omit=dev --ignore-scripts && npm cache clean --force
 
-# Install dependencies with legacy peer deps to resolve conflicts, skip postinstall
-ENV SKIP_POSTINSTALL=1
-# Force sharp to rebuild from source with proper bindings
-ENV SHARP_IGNORE_GLOBAL_LIBVIPS=1
-RUN npm install --legacy-peer-deps && npm rebuild sharp
-
-# Copy rest of application source
-COPY --chown=opencollective:nodejs . .
-
-# Build the application
+# Build stage - install all deps including dev dependencies
+FROM base AS build
+# Copy all source files first so config files are available
+COPY . .
+ENV NEXT_TELEMETRY_DISABLED=1
+# Install all dependencies including dev deps with --legacy-peer-deps  
+RUN npm install --legacy-peer-deps
+# Rebuild native modules for the current platform
+RUN npm rebuild lightningcss @tailwindcss/node
 RUN npm run build
 
-# Create necessary directories
-RUN mkdir -p /usr/src/app/logs
-RUN chown -R opencollective:nodejs /usr/src/app
+# Production stage
+FROM base AS runner
+WORKDIR /usr/src/frontend
 
-# Switch to non-root user
-USER opencollective
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
 
-# Expose port
-EXPOSE 3060
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+# Copy built application
+COPY --from=build /usr/src/frontend/public ./public
+COPY --from=build --chown=nextjs:nodejs /usr/src/frontend/.next/standalone ./
+COPY --from=build --chown=nextjs:nodejs /usr/src/frontend/.next/static ./.next/static
+
+USER nextjs
+
+EXPOSE 3000
+
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:3060/health || exit 1
+  CMD curl -f http://localhost:3000/api/health || exit 1
 
-# Start the application
-CMD ["npm", "start"]
+CMD ["node", "server.js"]

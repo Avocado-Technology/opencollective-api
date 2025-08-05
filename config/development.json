@@ -1,5 +1,14 @@
 {
   "env": "development",
+  "database": {
+    "options": {
+      "dialectOptions": {
+        "ssl": {
+          "rejectUnauthorized": false
+        }
+      }
+    }
+  },
   "opensearch": {
     "url": "http://localhost:9200"
   },
