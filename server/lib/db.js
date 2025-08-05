@@ -57,6 +57,10 @@ export function getDBConf(name) {
   if (name === 'database') {
     const dbConfigOverride = get(config, [name, 'override'], {});
     dbConfig = { ...dbConfig, ...dbConfigOverride };
+    // Ensure port is a number if it exists
+    if (dbConfig.port && typeof dbConfig.port === 'string') {
+      dbConfig.port = parseInt(dbConfig.port);
+    }
   }
   return dbConfig;
 }
@@ -67,7 +71,7 @@ export function getDBConf(name) {
  */
 export function parseDBUrl(url) {
   const { database, user, password, host, port, dialect } = pgConnectionString.parse(url);
-  return { database, username: user, password, host, port: port || 5432, dialect: dialect || 'postgres' };
+  return { database, username: user, password, host, port: parseInt(port) || 5432, dialect: dialect || 'postgres' };
 }
 
 /** Assemble an URL from database connection options.
